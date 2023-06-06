@@ -1,4 +1,9 @@
-## Hi there 👋
+# Munich University of Applied Sciences - Open Source Projects
+<p align="center">
+
+![Logo](/.profile/logo.png)
+
+</p>
 
 <!--
 
