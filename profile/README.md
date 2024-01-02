@@ -11,10 +11,9 @@
 - [Backend Code](https://github.com/hm-edu/portal-backend) & [Frontend Code](https://github.com/hm-edu/portal-frontend)
 - [Sectigo Client Library](https://github.com/hm-edu/sectigo-client)
 
-## DNS Utilities
+## Misc Utilities
 
 - [Extensions for `DNSControl`](https://github.com/hm-edu/dnscontrol-extended)
-
-## CI Helper
-
 - [Docker Container containing Ansible Tools](https://github.com/hm-edu/ansible-ci)
+- [Dockerized version of `certspotter`](https://github.com/hm-edu/certspotter/)
+- [Prometheus Exporter for Rittal CMC, PDU and LCP](https://github.com/hm-edu/rittal-exporter)
