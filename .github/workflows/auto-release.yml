@@ -1,0 +1,141 @@
+# Reusable workflow: hands-off releases for hm-edu repositories.
+#
+# Callers trigger it weekly (cron), when a PR labelled `security` is merged,
+# and via workflow_dispatch. It computes the next semver from conventional
+# commits since the last tag and creates the tag (+ GitHub release).
+#
+# The tag/release is created with a GitHub App token, NOT GITHUB_TOKEN, so the
+# repo's own `push: tags` / `release: published` workflows fire as if a human
+# had tagged. The App needs Contents: write (+ Actions: write when
+# dispatch_workflow is used); its credentials live in the org secrets
+# RELEASE_APP_ID / RELEASE_APP_KEY.
+name: Auto release
+
+on:
+  workflow_call:
+    inputs:
+      default_bump:
+        description: Bump when there are commits but none is feat/fix/breaking ("patch", "minor" or "none" to skip)
+        type: string
+        default: patch
+      tag_prefix:
+        type: string
+        default: v
+      release_branch:
+        type: string
+        default: main
+      create_release:
+        description: Create a GitHub release with generated notes. Set false when goreleaser (or similar) creates the release itself from the tag.
+        type: boolean
+        default: true
+      dispatch_workflow:
+        description: Optional workflow file to run with -f release_tag=<tag> after tagging (for repos that build on workflow_dispatch instead of tag/release events).
+        type: string
+        default: ""
+    secrets:
+      RELEASE_APP_ID:
+        required: true
+      RELEASE_APP_KEY:
+        required: true
+    outputs:
+      tag:
+        value: ${{ jobs.release.outputs.tag }}
+      released:
+        value: ${{ jobs.release.outputs.released }}
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      released: ${{ steps.version.outputs.release }}
+    steps:
+      - name: Mint app token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_branch }}
+          fetch-depth: 0
+          token: ${{ steps.app.outputs.token }}
+
+      - name: Determine next version
+        id: version
+        env:
+          PREFIX: ${{ inputs.tag_prefix }}
+          DEFAULT_BUMP: ${{ inputs.default_bump }}
+        run: |
+          set -euo pipefail
+          last_tag=$(git tag --list "${PREFIX}[0-9]*" --sort=-v:refname | head -n1)
+          if [ -z "$last_tag" ]; then
+            echo "tag=${PREFIX}1.0.0" >> "$GITHUB_OUTPUT"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "First release: ${PREFIX}1.0.0"
+            exit 0
+          fi
+
+          commits=$(git rev-list "${last_tag}..HEAD" --count)
+          if [ "$commits" -eq 0 ]; then
+            echo "No commits since ${last_tag}, nothing to release."
+            echo "tag=${last_tag}" >> "$GITHUB_OUTPUT"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          subjects=$(git log "${last_tag}..HEAD" --pretty=%s)
+          bodies=$(git log "${last_tag}..HEAD" --pretty=%B)
+          bump="$DEFAULT_BUMP"
+          if echo "$bodies" | grep -q 'BREAKING CHANGE' \
+             || echo "$subjects" | grep -Eq '^[a-z]+(\([^)]*\))?!:'; then
+            bump=major
+          elif echo "$subjects" | grep -Eq '^feat(\([^)]*\))?:'; then
+            bump=minor
+          elif echo "$subjects" | grep -Eq '^fix(\([^)]*\))?:'; then
+            bump=patch
+          fi
+
+          if [ "$bump" = "none" ]; then
+            echo "Only non-releasable commits since ${last_tag} (default_bump=none), skipping."
+            echo "tag=${last_tag}" >> "$GITHUB_OUTPUT"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          IFS=. read -r major minor patch <<< "${last_tag#"$PREFIX"}"
+          case "$bump" in
+            major) major=$((major+1)); minor=0; patch=0 ;;
+            minor) minor=$((minor+1)); patch=0 ;;
+            patch) patch=$((patch+1)) ;;
+            *) echo "unknown bump '$bump'" >&2; exit 1 ;;
+          esac
+          next="${PREFIX}${major}.${minor}.${patch}"
+          echo "Next release: ${next} (${bump} bump, ${commits} commits since ${last_tag})"
+          echo "tag=${next}" >> "$GITHUB_OUTPUT"
+          echo "release=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create release (tag + notes)
+        if: steps.version.outputs.release == 'true' && inputs.create_release
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: gh release create "${{ steps.version.outputs.tag }}" --target "${{ github.sha }}" --title "${{ steps.version.outputs.tag }}" --generate-notes
+
+      - name: Create tag only
+        if: steps.version.outputs.release == 'true' && !inputs.create_release
+        run: |
+          git config user.name "hm-edu-release-bot[bot]"
+          git config user.email "hm-edu-release-bot[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.version.outputs.tag }}" -m "${{ steps.version.outputs.tag }}"
+          git push origin "refs/tags/${{ steps.version.outputs.tag }}"
+
+      - name: Dispatch build workflow
+        if: steps.version.outputs.release == 'true' && inputs.dispatch_workflow != ''
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: gh workflow run "${{ inputs.dispatch_workflow }}" --ref "${{ steps.version.outputs.tag }}" -f "release_tag=${{ steps.version.outputs.tag }}"
